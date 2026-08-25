@@ -16,9 +16,45 @@ module Meals
 
     MAX_REPAIR_ATTEMPTS = 1
 
+    # Retryable: the request may well succeed on another attempt, so these
+    # propagate out of #call for AnalyzeMealJob's retry policy to act on.
     class ProviderError < StandardError; end
     class RateLimited < ProviderError; end
+
+    # Terminal: another attempt would fail the same way. These are recorded on
+    # the meal and swallowed, because there is nothing for the job to retry.
     class ContentFiltered < StandardError; end
+    class ConfigurationError < StandardError; end
+
+    # ruby_llm splits its errors across two families: HTTP failures subclass
+    # RubyLLM::Error, while setup failures (missing key, unknown model) subclass
+    # StandardError directly. Rescuing only RubyLLM::Error misses the second
+    # family entirely and leaves the meal stuck in `processing`, so both are
+    # mapped explicitly below.
+    SETUP_ERRORS = [
+      RubyLLM::ConfigurationError,   # no API key for the chosen provider
+      RubyLLM::ModelNotFoundError,   # model id absent from the bundled registry
+      RubyLLM::InvalidRoleError,
+      RubyLLM::InvalidToolChoiceError,
+      RubyLLM::UnsupportedAttachmentError
+    ].freeze
+
+    # HTTP failures a human has to fix: credentials, billing, permissions.
+    ACCESS_ERRORS = [
+      RubyLLM::UnauthorizedError,
+      RubyLLM::PaymentRequiredError,
+      RubyLLM::ForbiddenError
+    ].freeze
+
+    # HTTP failures that are worth another attempt.
+    TRANSIENT_ERRORS = [
+      RubyLLM::ServerError,
+      RubyLLM::ServiceUnavailableError,
+      RubyLLM::OverloadedError,
+      Faraday::TimeoutError,
+      Faraday::ConnectionFailed,
+      Net::ReadTimeout
+    ].freeze
 
     def initialize(meal, model: LlmConfig.model)
       @meal = meal
@@ -33,12 +69,21 @@ module Meals
       latency_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
 
       persist(extraction, latency_ms)
-    rescue RateLimited => e
-      failure(:rate_limited, e.message)
-    rescue ProviderError => e
-      failure(:provider_error, e.message)
+    rescue RateLimited, ProviderError
+      # Leave the meal claimable by the retry rather than marking it failed --
+      # `failed` counts as settled, and the job skips settled meals.
+      meal.update!(status: :pending)
+      raise
     rescue ContentFiltered => e
       failure(:content_filtered, e.message)
+    rescue ConfigurationError => e
+      failure(:configuration_error, e.message)
+    rescue StandardError => e
+      # Nothing should reach here, but a meal must never be left in
+      # `processing`. Record it, then re-raise so the failure is still visible
+      # in the job's failed executions rather than silently absorbed.
+      failure(:provider_error, "#{e.class}: #{e.message}")
+      raise
     end
 
     private
@@ -67,23 +112,40 @@ module Meals
     end
 
     def new_chat
-      RubyLLM.chat(model: model)
-             .with_instructions(Prompt::SYSTEM)
-             .with_schema(NutritionSchema)
+      build_chat
+        .with_instructions(Prompt::SYSTEM)
+        .with_schema(NutritionSchema)
+    rescue *SETUP_ERRORS => e
+      # Raised before any request is made -- an unknown model id, or no API key
+      # for the chosen provider. An unknown model usually means it is newer than
+      # the installed gem; set LLM_PROVIDER to skip the registry check.
+      raise ConfigurationError, e.message
     end
 
-    # Translates provider failures into the taxonomy the job layer retries on.
+    def build_chat
+      if LlmConfig.skip_registry_check?
+        RubyLLM.chat(model: model, provider: LlmConfig.provider, assume_model_exists: true)
+      else
+        RubyLLM.chat(model: model)
+      end
+    end
+
+    # Translates both of ruby_llm's error families into the retry taxonomy.
     def ask(_chat)
       yield
     rescue RubyLLM::RateLimitError => e
       raise RateLimited, e.message
-    rescue RubyLLM::UnauthorizedError, RubyLLM::PaymentRequiredError => e
-      # Not retryable: the key or the billing needs a human.
+    rescue *ACCESS_ERRORS => e
+      raise ConfigurationError, e.message
+    rescue *SETUP_ERRORS => e
+      raise ConfigurationError, e.message
+    rescue *TRANSIENT_ERRORS => e
+      raise ProviderError, "#{e.class}: #{e.message}"
+    rescue RubyLLM::BadRequestError, RubyLLM::ContextLengthExceededError => e
+      # Malformed or oversized request: the same call would fail again.
       raise ContentFiltered, e.message
     rescue RubyLLM::Error => e
       raise ProviderError, e.message
-    rescue Faraday::TimeoutError, Net::ReadTimeout => e
-      raise ProviderError, "timed out after #{LlmConfig.timeout}s: #{e.message}"
     end
 
     def repair_instruction(extraction)

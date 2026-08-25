@@ -68,7 +68,7 @@ RSpec.describe Meals::Analyzer do
       analyzer.call
 
       expect(meal.reload).to have_attributes(
-        model_id: "gemini-3.6-flash",
+        model_id: LlmConfig.model,
         input_tokens: 900,
         output_tokens: 120
       )
@@ -151,42 +151,114 @@ RSpec.describe Meals::Analyzer do
   end
 
   describe "provider failures" do
-    it "classifies a rate limit as retryable" do
+    # Retryable failures propagate so AnalyzeMealJob's retry_on can act on them.
+    # They are deliberately NOT recorded as failed here: `failed` counts as
+    # settled, and the job skips settled meals, which would kill the retry.
+    it "re-raises a rate limit for the job to retry" do
       chat_double
       allow(RubyLLM.chat).to receive(:ask).and_raise(RubyLLM::RateLimitError.new("429"))
 
-      analyzer.call
-
-      expect(meal.reload.failure_kind).to eq("rate_limited")
+      expect { analyzer.call }.to raise_error(described_class::RateLimited)
     end
 
-    it "classifies a server error as retryable" do
+    it "leaves the meal claimable after a retryable failure" do
+      chat_double
+      allow(RubyLLM.chat).to receive(:ask).and_raise(RubyLLM::RateLimitError.new("429"))
+
+      suppress(described_class::RateLimited) { analyzer.call }
+
+      expect(meal.reload).to be_pending
+    end
+
+    it "re-raises a server error for the job to retry" do
       chat_double
       allow(RubyLLM.chat).to receive(:ask).and_raise(RubyLLM::ServerError.new("503"))
 
-      analyzer.call
-
-      expect(meal.reload.failure_kind).to eq("provider_error")
+      expect { analyzer.call }.to raise_error(described_class::ProviderError)
     end
 
-    it "classifies a timeout as retryable" do
+    it "re-raises a timeout for the job to retry" do
       chat_double
       allow(RubyLLM.chat).to receive(:ask).and_raise(Faraday::TimeoutError.new("execution expired"))
+
+      expect { analyzer.call }.to raise_error(described_class::ProviderError, /TimeoutError/)
+    end
+
+    it "treats a malformed request as terminal, since retrying repeats it" do
+      chat_double
+      allow(RubyLLM.chat).to receive(:ask).and_raise(RubyLLM::BadRequestError.new("400"))
+
+      analyzer.call
+
+      expect(meal.reload.failure_kind).to eq("content_filtered")
+    end
+
+    it "records a missing API key rather than leaving the meal processing" do
+      # RubyLLM::ConfigurationError subclasses StandardError, not
+      # RubyLLM::Error -- the second of ruby_llm's two error families.
+      chat_double
+      allow(RubyLLM.chat).to receive(:ask).and_raise(RubyLLM::ConfigurationError.new("no key"))
 
       analyzer.call
 
       expect(meal.reload).to be_failed
-      expect(meal.failure_kind).to eq("provider_error")
-      expect(meal.failure_reason).to include('timed out')
+      expect(meal.failure_kind).to eq("configuration_error")
     end
 
-    it "classifies a bad credential as terminal, not worth retrying" do
+    it "classifies a bad credential as a configuration problem, not a retryable one" do
       chat_double
       allow(RubyLLM.chat).to receive(:ask).and_raise(RubyLLM::UnauthorizedError.new("401"))
 
       analyzer.call
 
-      expect(meal.reload.failure_kind).to eq("content_filtered")
+      expect(meal.reload.failure_kind).to eq("configuration_error")
+    end
+
+    it "records an unknown model instead of leaving the meal stuck processing" do
+      # ModelNotFoundError subclasses StandardError rather than RubyLLM::Error,
+      # so it slips past a rescue chain built around RubyLLM::Error and strands
+      # the record mid-flight. Raised at chat construction, before any request.
+      allow(RubyLLM).to receive(:chat).and_raise(
+        RubyLLM::ModelNotFoundError.new("Unknown model: \"gemini-9-flash\"")
+      )
+
+      analyzer.call
+
+      expect(meal.reload).to be_failed
+      expect(meal.failure_kind).to eq("configuration_error")
+      expect(meal.failure_reason).to include("Unknown model")
+    end
+
+    it "never leaves a meal in processing, whatever goes wrong" do
+      allow(RubyLLM).to receive(:chat).and_raise(RubyLLM::ModelNotFoundError.new("nope"))
+
+      analyzer.call
+
+      expect(meal.reload).not_to be_processing
+    end
+  end
+
+  describe "model selection" do
+    it "validates the model against the registry by default" do
+      chat_double(response(apple_payload))
+
+      analyzer.call
+
+      expect(RubyLLM).to have_received(:chat).with(model: LlmConfig.model)
+    end
+
+    it "skips registry validation when a provider is named" do
+      # Lets a model newer than the installed ruby_llm be used without waiting
+      # for a gem release.
+      allow(ENV).to receive(:[]).and_call_original
+      allow(ENV).to receive(:[]).with("LLM_PROVIDER").and_return("gemini")
+      chat_double(response(apple_payload))
+
+      described_class.new(meal, model: "gemini-3.6-flash").call
+
+      expect(RubyLLM).to have_received(:chat).with(
+        model: "gemini-3.6-flash", provider: :gemini, assume_model_exists: true
+      )
     end
   end
 

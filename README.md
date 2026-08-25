@@ -56,8 +56,17 @@ The API is on http://localhost:3000, and Swagger UI on http://localhost:3000/api
 The provider is inferred from the model id, so it is one line in `.env`:
 
 ```
-LLM_MODEL=gemini-3.6-flash   # default: vision + structured output, low cost
+LLM_MODEL=gemini-3.5-flash   # default: vision + structured output, low cost
 LLM_MODEL=gpt-4o             # OpenAI instead — no code change
+```
+
+ruby_llm validates model ids against a registry bundled with the gem, so a model
+released after your installed version is rejected before any request is made.
+Naming the provider skips that check:
+
+```
+LLM_MODEL=gemini-3.6-flash
+LLM_PROVIDER=gemini
 ```
 
 ## Running the checks

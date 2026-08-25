@@ -24,10 +24,11 @@ class Meal < ApplicationRecord
 
   # Why an analysis failed, which decides whether retrying is worth anything.
   enum :failure_kind, {
-    provider_error: "provider_error",       # 5xx or timeout -- retryable
-    rate_limited: "rate_limited",           # 429 -- retryable, back off harder
+    provider_error: "provider_error",         # 5xx or timeout -- retryable
+    rate_limited: "rate_limited",             # 429 -- retryable, back off harder
     invalid_extraction: "invalid_extraction", # well-formed but implausible
-    content_filtered: "content_filtered"    # provider refused -- terminal
+    content_filtered: "content_filtered",     # provider refused the content
+    configuration_error: "configuration_error" # bad key, unknown model -- needs a human
   }, prefix: true, allow_nil: true
 
   validates :image_checksum, presence: true, uniqueness: true
