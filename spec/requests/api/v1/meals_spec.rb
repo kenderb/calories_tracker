@@ -1,132 +1,152 @@
-require "rails_helper"
+require "swagger_helper"
 
+# These specs are the OpenAPI source. `rake rswag:specs:swaggerize` runs them
+# and writes swagger/v1/swagger.yaml from what actually happened, and CI fails
+# if the committed document differs -- so the docs cannot drift from the code.
 RSpec.describe "Api::V1::Meals" do
   let(:user) { create(:user) }
-  let(:headers) { { "Authorization" => "Bearer #{user.api_token}" } }
+  let(:Authorization) { "Bearer #{user.api_token}" }
   let(:photo) { fixture_file_upload("meal.jpg", "image/jpeg") }
-  let(:checksum) { Digest::SHA256.hexdigest(Rails.root.join("spec/fixtures/files/meal.jpg").read) }
+  let(:fixture_checksum) do
+    Digest::SHA256.hexdigest(Rails.root.join("spec/fixtures/files/meal.jpg").read)
+  end
 
-  def body = response.parsed_body
+  path "/api/v1/meals" do
+    post "Analyze a meal photo" do
+      tags "Meals"
+      consumes "multipart/form-data"
+      produces "application/json"
+      description <<~DESC
+        Uploads a photo for analysis.
 
-  describe "authentication" do
-    it "rejects a request with no token" do
-      post "/api/v1/meals", params: { photo: }
+        Returns `202 Accepted` when a new analysis was queued -- poll the URL in
+        the `Location` header until `status` leaves `pending`/`processing`.
 
-      expect(response).to have_http_status(:unauthorized)
-      expect(response.media_type).to eq("application/problem+json")
-    end
+        Returns `200 OK` when this exact image has already been analysed. The
+        stored result comes back immediately with `reused: true`, and no model
+        call is made.
+      DESC
+      security [ { bearer_auth: [] } ]
 
-    it "rejects an unknown token" do
-      post "/api/v1/meals", params: { photo: }, headers: { "Authorization" => "Bearer nope" }
+      # rswag copies this schema straight into the OpenAPI requestBody, and
+      # separately builds the test request keyed by the parameter name. So the
+      # schema describes the whole multipart body (which is what Swagger UI
+      # needs to render a file picker), while `name:` still drives the request.
+      parameter name: :photo, in: :formData, required: true,
+                schema: {
+                  type: :object,
+                  properties: {
+                    photo: {
+                      type: :string,
+                      format: :binary,
+                      description: "JPEG, PNG, WebP or HEIC, up to 10MB."
+                    }
+                  },
+                  required: [ "photo" ]
+                }
 
-      expect(response).to have_http_status(:unauthorized)
-    end
+      response "202", "analysis queued" do
+        schema "$ref" => "#/components/schemas/Meal"
+        header "Location", schema: { type: :string }, description: "Where to poll for the result."
 
-    it "rejects a token sent without the Bearer scheme" do
-      post "/api/v1/meals", params: { photo: }, headers: { "Authorization" => user.api_token }
+        run_test! do |response|
+          body = JSON.parse(response.body)
+          expect(body["status"]).to eq("pending")
+          expect(body["reused"]).to be(false)
+          expect(response.headers["Location"]).to end_with("/api/v1/meals/#{body['id']}")
+        end
+      end
 
-      expect(response).to have_http_status(:unauthorized)
+      response "200", "this photo was already analysed; stored result returned" do
+        schema "$ref" => "#/components/schemas/Meal"
+
+        before { create(:meal, :succeeded, image_checksum: fixture_checksum) }
+
+        run_test! do |response|
+          body = JSON.parse(response.body)
+          expect(body["reused"]).to be(true)
+          expect(body["status"]).to eq("succeeded")
+        end
+      end
+
+      response "400", "no photo supplied" do
+        schema "$ref" => "#/components/schemas/Problem"
+        let(:photo) { nil }
+
+        run_test!
+      end
+
+      response "401", "missing or invalid token" do
+        schema "$ref" => "#/components/schemas/Problem"
+        let(:Authorization) { "Bearer not-a-real-token" }
+
+        run_test!
+      end
+
+      response "415", "file is not a supported image type" do
+        schema "$ref" => "#/components/schemas/Problem"
+        let(:photo) { fixture_file_upload("meal.jpg", "application/pdf") }
+
+        run_test!
+      end
     end
   end
 
-  describe "POST /api/v1/meals" do
-    it "accepts the upload and queues the analysis" do
-      post "/api/v1/meals", params: { photo: }, headers: headers
-      expect(response).to have_http_status(:accepted)
-      expect(body["status"]).to eq("pending")
-      expect(body["reused"]).to be(false)
-    end
+  path "/api/v1/meals/{id}" do
+    parameter name: :id, in: :path, type: :integer, description: "Meal id."
 
-    it "returns a Location header pointing at the result" do
-      post "/api/v1/meals", params: { photo: }, headers: headers
-      expect(response.headers["Location"]).to end_with("/api/v1/meals/#{body['id']}")
-    end
+    get "Fetch a meal analysis" do
+      tags "Meals"
+      produces "application/json"
+      description <<~DESC
+        Returns the current state of an analysis.
 
-    it "returns 200 and the stored analysis for a photo already seen" do
-      create(:meal, :succeeded, image_checksum: checksum)
+        While `status` is `pending` or `processing` the nutrition fields are
+        absent. Once `succeeded`, `items` and `total` are populated, and each
+        item carries a `per_100g` basis for re-weighing client-side.
 
-      post "/api/v1/meals", params: { photo: }, headers: headers
-      expect(response).to have_http_status(:ok)
-      expect(body["reused"]).to be(true)
-      expect(body["status"]).to eq("succeeded")
-    end
+        Meals are global, so any authenticated user may read any meal id.
+      DESC
+      security [ { bearer_auth: [] } ]
 
-    it "spends no model call on a photo already seen" do
-      create(:meal, :succeeded, image_checksum: checksum)
+      response "200", "analysis complete" do
+        schema "$ref" => "#/components/schemas/Meal"
+        let(:id) { create(:meal, :succeeded).id }
 
-      expect { post "/api/v1/meals", params: { photo: }, headers: }
-        .not_to have_enqueued_job(AnalyzeMealJob)
-    end
+        run_test! do |response|
+          body = JSON.parse(response.body)
+          expect(body["status"]).to eq("succeeded")
+          expect(body["items"].first).to include("food_name" => "Apple", "grams" => 182.0)
+          expect(body["total"]["kcal"]).to eq(95.0)
+          expect(body["items"].first["per_100g"]).to include("kcal" => 52.0)
+        end
+      end
 
-    it "requires a photo" do
-      post "/api/v1/meals", params: {}, headers: headers
-      expect(response).to have_http_status(:bad_request)
-    end
+      response "200", "analysis still running" do
+        schema "$ref" => "#/components/schemas/Meal"
+        let(:id) { create(:meal).id }
 
-    it "rejects a file that is not an image" do
-      post "/api/v1/meals",
-           params: { photo: fixture_file_upload("meal.jpg", "application/pdf") },
-           headers: headers
-      expect(response).to have_http_status(:unsupported_media_type)
-    end
-  end
+        run_test! do |response|
+          body = JSON.parse(response.body)
+          expect(body["status"]).to eq("pending")
+          expect(body).not_to have_key("items")
+        end
+      end
 
-  describe "GET /api/v1/meals/:id" do
-    it "reports a pending analysis without nutrition data" do
-      meal = create(:meal)
+      response "404", "no meal with that id" do
+        schema "$ref" => "#/components/schemas/Problem"
+        let(:id) { 999_999 }
 
-      get "/api/v1/meals/#{meal.id}", headers: headers
-      expect(response).to have_http_status(:ok)
-      expect(body["status"]).to eq("pending")
-      expect(body).not_to have_key("items")
-    end
+        run_test!
+      end
 
-    it "returns items and totals once succeeded" do
-      meal = create(:meal, :succeeded)
+      response "401", "missing or invalid token" do
+        schema "$ref" => "#/components/schemas/Problem"
+        let(:id) { create(:meal).id }
+        let(:Authorization) { "" }
 
-      get "/api/v1/meals/#{meal.id}", headers: headers
-      expect(body["status"]).to eq("succeeded")
-      expect(body["items"].first).to include("food_name" => "Apple", "grams" => 182.0)
-      expect(body["total"]["kcal"]).to eq(95.0)
-    end
-
-    it "exposes the per-100g basis so a client can re-weigh a food" do
-      meal = create(:meal, :succeeded)
-
-      get "/api/v1/meals/#{meal.id}", headers: headers
-      expect(body["items"].first["per_100g"]).to include("kcal" => 52.0)
-    end
-
-    it "reports a photo with no food as an empty result, not an error" do
-      meal = create(:meal, :not_food)
-
-      get "/api/v1/meals/#{meal.id}", headers: headers
-      expect(response).to have_http_status(:ok)
-      expect(body["status"]).to eq("not_food")
-      expect(body["items"]).to eq([])
-    end
-
-    it "explains a failure without leaking the raw payload" do
-      meal = create(:meal, :failed)
-
-      get "/api/v1/meals/#{meal.id}", headers: headers
-      expect(body["failure"]).to eq("kind" => "provider_error", "reason" => "upstream timed out")
-      expect(body).not_to have_key("raw_response")
-    end
-
-    it "returns problem+json for an unknown id" do
-      get "/api/v1/meals/999999", headers: headers
-      expect(response).to have_http_status(:not_found)
-      expect(response.media_type).to eq("application/problem+json")
-    end
-
-    it "lets any authenticated user read a meal, since meals are global" do
-      meal = create(:meal, :succeeded)
-      other = create(:user)
-
-      get "/api/v1/meals/#{meal.id}", headers: { "Authorization" => "Bearer #{other.api_token}" }
-
-      expect(response).to have_http_status(:ok)
+        run_test!
+      end
     end
   end
 end
