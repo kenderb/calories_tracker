@@ -50,6 +50,10 @@ Rails.application.configure do
   # Append comments with runtime information tags to SQL queries in logs.
   config.active_record.query_log_tags_enabled = true
 
+  # Run jobs through Solid Queue in development too, so the async upload flow
+  # behaves the same locally as it does in production (bin/jobs runs the worker).
+  config.active_job.queue_adapter = :solid_queue
+
   # Highlight code that enqueued background job in logs.
   config.active_job.verbose_enqueue_logs = true
 
