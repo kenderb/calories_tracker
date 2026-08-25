@@ -1,0 +1,11 @@
+# Normalize to LF in the repo. Without this, files checked out on Windows get
+# CRLF and shell scripts copied into the Linux container fail with
+# "bad interpreter: /bin/bash^M".
+* text=auto eol=lf
+
+*.sh      text eol=lf
+bin/*     text eol=lf
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.ico     binary

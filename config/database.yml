@@ -1,0 +1,23 @@
+# One database per environment, driven by DATABASE_URL.
+#
+# Rails 8 defaults to separate `cache`/`queue`/`cable` databases in production.
+# This app keeps Solid Queue in the primary database instead: one database is
+# simpler to run in Docker and in CI, and the job volume here is nowhere near
+# the point where splitting it pays off.
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+  url: <%= ENV["DATABASE_URL"] %>
+
+development:
+  <<: *default
+  database: calories_tracker_development
+
+test:
+  <<: *default
+  database: calories_tracker_test
+
+production:
+  <<: *default
+  database: calories_tracker_production
