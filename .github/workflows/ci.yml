@@ -22,6 +22,18 @@ jobs:
           bundler-cache: true
       - run: bundle exec rubocop --parallel --format github
 
+      # Files created on Windows are committed without the executable bit, so
+      # bin/rails and friends fail here with "Permission denied". Catch it at
+      # lint time rather than three jobs later.
+      - name: bin/ scripts are executable
+        run: |
+          nonexec=$(git ls-files --stage bin/ | awk '$1 != "100755" { print $4 }')
+          if [ -n "$nonexec" ]; then
+            echo "::error::Not executable: $nonexec"
+            echo "Fix with: git update-index --chmod=+x <file>"
+            exit 1
+          fi
+
   security:
     name: Brakeman + bundler-audit
     runs-on: ubuntu-latest
