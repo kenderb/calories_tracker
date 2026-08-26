@@ -9,6 +9,14 @@ class Meal < ApplicationRecord
   has_many :items, class_name: "MealItem", dependent: :destroy
   has_many :meal_requests, dependent: :destroy
 
+  # The upload that brought this analysis into existence. Every later request
+  # for the same photo is a reuse, so the earliest one is the upload that
+  # actually spent the model call -- and the only meaningful answer to "who
+  # uploaded this?". Meals are readable by anyone, so this is what makes an
+  # analysis traceable back to a person.
+  has_one :original_request, -> { order(:id) },
+          class_name: "MealRequest", inverse_of: :meal
+
   # pending    queued, not yet picked up
   # processing a worker is mid-call
   # succeeded  extraction passed both the schema and the plausibility checks

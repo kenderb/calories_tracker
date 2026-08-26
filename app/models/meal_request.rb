@@ -3,7 +3,7 @@
 # meals stay global and reusable while still tracking who uploaded what.
 class MealRequest < ApplicationRecord
   belongs_to :user
-  belongs_to :meal
+  belongs_to :meal, inverse_of: :meal_requests
 
   scope :reused, -> { where(reused: true) }
 end

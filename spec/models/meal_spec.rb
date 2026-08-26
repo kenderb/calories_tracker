@@ -40,6 +40,30 @@ RSpec.describe Meal do
     end
   end
 
+  describe "#original_request" do
+    it "is the upload that created the analysis, not a later reuse" do
+      meal = create(:meal, :succeeded)
+      uploader = create(:user)
+      create(:meal_request, meal:, user: uploader)
+      create(:meal_request, meal:, user: create(:user), reused: true)
+
+      expect(meal.reload.original_request.user).to eq(uploader)
+    end
+
+    it "stays the same however many people re-upload the photo" do
+      meal = create(:meal, :succeeded)
+      uploader = create(:user)
+      create(:meal_request, meal:, user: uploader)
+      3.times { create(:meal_request, meal:, user: create(:user), reused: true) }
+
+      expect(meal.reload.original_request.user).to eq(uploader)
+    end
+
+    it "is nil for a meal nobody has requested" do
+      expect(create(:meal).original_request).to be_nil
+    end
+  end
+
   describe ".reusable" do
     it "includes settled analyses worth serving from cache" do
       succeeded = create(:meal, :succeeded)

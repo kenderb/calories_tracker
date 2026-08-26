@@ -13,6 +13,7 @@ module Api
           id: meal.id,
           status: meal.status,
           reused: reused,
+          uploaded_by: uploaded_by,
           created_at: meal.created_at.iso8601,
           analyzed_at: meal.analyzed_at&.iso8601
         }
@@ -28,6 +29,15 @@ module Api
       private
 
       attr_reader :meal, :reused
+
+      # The id of whoever uploaded the photo in the first place -- not
+      # whoever is asking now, which for a reused analysis is someone else.
+      #
+      # An id rather than an email: any authenticated user may read any meal,
+      # so a name or address here would hand every user's identity to everyone.
+      def uploaded_by
+        meal.original_request&.user_id
+      end
 
       def nutrition_payload
         items = meal.items.map { |item| item_payload(item) }

@@ -210,6 +210,11 @@ components:
         reused:
           type: boolean
           description: True when this response came from an existing analysis.
+        uploaded_by:
+          type: integer
+          nullable: true
+          description: Id of the user who first uploaded this photo. Meals are global,
+            so for a reused analysis this is someone other than the caller.
         created_at:
           type: string
           format: date-time
@@ -251,6 +256,7 @@ components:
       - id
       - status
       - reused
+      - uploaded_by
       - created_at
     Problem:
       type: object

@@ -79,6 +79,13 @@ RSpec.configure do |config|
                 type: :boolean,
                 description: "True when this response came from an existing analysis."
               },
+              uploaded_by: {
+                type: :integer,
+                nullable: true,
+                description: "Id of the user who first uploaded this photo. Meals are " \
+                             "global, so for a reused analysis this is someone other " \
+                             "than the caller."
+              },
               created_at: { type: :string, format: :"date-time" },
               analyzed_at: { type: :string, format: :"date-time", nullable: true },
               items: { type: :array, items: { "$ref" => "#/components/schemas/MealItem" } },
@@ -104,7 +111,7 @@ RSpec.configure do |config|
                 }
               }
             },
-            required: %w[id status reused created_at]
+            required: %w[id status reused uploaded_by created_at]
           },
           Problem: {
             type: :object,

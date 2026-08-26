@@ -85,6 +85,53 @@ RSpec.describe "Api::V1::Meals behaviour" do
     expect(response).to have_http_status(:ok)
   end
 
+  describe "traceability" do
+    it "reports the uploader on the response to their own upload" do
+      post "/api/v1/meals", params: { photo: photo }, headers: headers
+
+      expect(body["uploaded_by"]).to eq(user.id)
+    end
+
+    it "names whoever uploaded first, not whoever is asking now" do
+      # The point of the field: meals are global, so the person reading an
+      # analysis is often not the person who paid for it.
+      create(:meal, :succeeded, image_checksum: checksum)
+      post "/api/v1/meals", params: { photo: photo }, headers: headers
+      uploader = user
+
+      stranger = create(:user)
+      post "/api/v1/meals", params: { photo: fixture_file_upload("meal.jpg", "image/jpeg") },
+           headers: { "Authorization" => "Bearer #{stranger.api_token}" }
+
+      expect(body["reused"]).to be(true)
+      expect(body["uploaded_by"]).to eq(uploader.id)
+    end
+
+    it "carries the uploader through to a later read of the meal" do
+      post "/api/v1/meals", params: { photo: photo }, headers: headers
+      id = body["id"]
+
+      get "/api/v1/meals/#{id}",
+          headers: { "Authorization" => "Bearer #{create(:user).api_token}" }
+
+      expect(body["uploaded_by"]).to eq(user.id)
+    end
+
+    it "exposes an id rather than an address, since every user can read every meal" do
+      post "/api/v1/meals", params: { photo: photo }, headers: headers
+
+      expect(body.to_s).not_to include(user.email)
+    end
+
+    it "is null for a meal that has no recorded upload" do
+      meal = create(:meal, :succeeded)
+
+      get "/api/v1/meals/#{meal.id}", headers: headers
+
+      expect(body["uploaded_by"]).to be_nil
+    end
+  end
+
   # The 400/415 contract is documented in meals_spec.rb; these are the
   # rejections that would only add noise to the OpenAPI document.
   describe "rejected uploads" do

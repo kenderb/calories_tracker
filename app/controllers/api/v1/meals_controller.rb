@@ -15,7 +15,7 @@ module Api
 
       # GET /api/v1/meals/:id
       def show
-        meal = Meal.includes(:items).find(params[:id])
+        meal = Meal.includes(:items, :original_request).find(params[:id])
 
         render json: MealSerializer.new(meal).as_json, status: :ok
       end
