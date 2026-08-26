@@ -112,4 +112,50 @@ RSpec.describe Meals::Intake do
       expect(intake.call).not_to be_reused
     end
   end
+
+  describe "an upload that fails the photo rules" do
+    subject(:result) { described_class.new(user:, upload: bad_upload).call }
+
+    let(:bad_upload) { fixture_file_upload("meal.jpg", "application/pdf") }
+
+    it "comes back rejected" do
+      expect(result).to be_rejected
+    end
+
+    it "passes the reason through from the validator" do
+      expect(result.rejection).to be_a(Meals::PhotoRejection::UnsupportedType)
+    end
+
+    it "has no meal, because nothing was created" do
+      expect(result.meal).to be_nil
+    end
+
+    it "is not reported as reused -- there is nothing to reuse" do
+      expect(result).not_to be_reused
+    end
+
+    it "stores nothing" do
+      expect { result }.not_to change(Meal, :count)
+    end
+
+    it "records no request against the user" do
+      expect { result }.not_to change(MealRequest, :count)
+    end
+
+    it "spends no model call" do
+      expect { result }.not_to have_enqueued_job(AnalyzeMealJob)
+    end
+
+    it "does not even read the file it is rejecting" do
+      allow(bad_upload).to receive(:read)
+
+      result
+
+      expect(bad_upload).not_to have_received(:read)
+    end
+  end
+
+  it "reports an acceptable upload as not rejected" do
+    expect(intake.call).not_to be_rejected
+  end
 end

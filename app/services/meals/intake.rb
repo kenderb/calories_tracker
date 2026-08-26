@@ -1,17 +1,26 @@
 module Meals
-  # Handles an upload, deciding whether it needs a model call at all.
+  # The whole of "a user uploaded a photo": vet the file, then decide whether
+  # it needs a model call at all.
   #
-  # Meals are keyed by the SHA-256 of the image bytes, so the same photo -- from
-  # this user or any other -- resolves to one analysis. What happens next
-  # depends on what that analysis already is:
+  # An unusable file is rejected here rather than in the controller, so the
+  # rules about what may be uploaded live next to the code that acts on it.
+  #
+  # Past the gate, meals are keyed by the SHA-256 of the image bytes, so the
+  # same photo -- from this user or any other -- resolves to one analysis. What
+  # happens next depends on what that analysis already is:
   #
   #   settled with an answer  serve it, no call
   #   still in flight         join it, no call (one is already queued)
   #   previously failed       retry it on the same record
   #   never seen              create it and queue the call
   class Intake
-    Result = Struct.new(:meal, :meal_request, :reused, keyword_init: true) do
+    Result = Struct.new(:meal, :meal_request, :reused, :rejection, keyword_init: true) do
       alias_method :reused?, :reused
+
+      # True when the upload never got as far as a meal: see `rejection`.
+      def rejected?
+        !rejection.nil?
+      end
     end
 
     def initialize(user:, upload:)
@@ -20,6 +29,9 @@ module Meals
     end
 
     def call
+      rejection = PhotoValidator.new(upload).call
+      return Result.new(rejection: rejection, reused: false) if rejection
+
       checksum = Digest::SHA256.hexdigest(upload.read)
       upload.rewind
 

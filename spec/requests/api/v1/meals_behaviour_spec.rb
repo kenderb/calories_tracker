@@ -84,4 +84,38 @@ RSpec.describe "Api::V1::Meals behaviour" do
 
     expect(response).to have_http_status(:ok)
   end
+
+  # The 400/415 contract is documented in meals_spec.rb; these are the
+  # rejections that would only add noise to the OpenAPI document.
+  describe "rejected uploads" do
+    it "refuses a photo bigger than the limit" do
+      stub_const("Meals::PhotoValidator::MAX_BYTES", 10)
+
+      post "/api/v1/meals", params: { photo: photo }, headers: headers
+
+      expect(response).to have_http_status(:content_too_large)
+      expect(response.media_type).to eq("application/problem+json")
+    end
+
+    it "refuses a `photo` that came through as a string rather than a file" do
+      post "/api/v1/meals", params: { photo: "https://example.com/lunch.jpg" }, headers: headers
+
+      expect(response).to have_http_status(:bad_request)
+      expect(body["detail"]).to eq("`photo` must be an uploaded file.")
+    end
+
+    it "tells the client which type it actually sent" do
+      post "/api/v1/meals", params: { photo: fixture_file_upload("meal.jpg", "application/pdf") },
+           headers: headers
+
+      expect(body["received"]).to eq("application/pdf")
+    end
+
+    it "stores nothing when the upload is refused" do
+      expect do
+        post "/api/v1/meals", params: { photo: fixture_file_upload("meal.jpg", "application/pdf") },
+             headers: headers
+      end.not_to change(Meal, :count)
+    end
+  end
 end
