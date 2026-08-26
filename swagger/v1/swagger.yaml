@@ -1,0 +1,276 @@
+---
+openapi: 3.0.3
+info:
+  title: Calories Tracker API
+  version: v1
+  description: |
+    Turns a photo of a meal into structured, validated nutrition data.
+
+    Analysis is asynchronous. POST a photo and you get `202 Accepted` with
+    an id; poll GET until `status` leaves `pending`/`processing`.
+
+    Photos are content-addressed by the SHA-256 of their bytes, and the
+    resulting analysis is global rather than per-user. Uploading a photo
+    that has already been analysed -- by you or anyone else -- returns
+    `200 OK` with `reused: true` and the stored result, and costs nothing.
+paths:
+  "/api/v1/meals":
+    post:
+      summary: Analyze a meal photo
+      tags:
+      - Meals
+      description: |
+        Uploads a photo for analysis.
+
+        Returns `202 Accepted` when a new analysis was queued -- poll the URL in
+        the `Location` header until `status` leaves `pending`/`processing`.
+
+        Returns `200 OK` when this exact image has already been analysed. The
+        stored result comes back immediately with `reused: true`, and no model
+        call is made.
+      security:
+      - bearer_auth: []
+      parameters: []
+      responses:
+        '202':
+          description: analysis queued
+          headers:
+            Location:
+              schema:
+                type: string
+              description: Where to poll for the result.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Meal"
+        '200':
+          description: this photo was already analysed; stored result returned
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Meal"
+        '400':
+          description: no photo supplied
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Problem"
+        '401':
+          description: missing or invalid token
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Problem"
+        '415':
+          description: file is not a supported image type
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Problem"
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                photo:
+                  type: string
+                  format: binary
+                  description: JPEG, PNG, WebP or HEIC, up to 10MB.
+              required:
+              - photo
+        required: true
+  "/api/v1/meals/{id}":
+    parameters:
+    - name: id
+      in: path
+      description: Meal id.
+      required: true
+      schema:
+        type: integer
+    get:
+      summary: Fetch a meal analysis
+      tags:
+      - Meals
+      description: |
+        Returns the current state of an analysis.
+
+        While `status` is `pending` or `processing` the nutrition fields are
+        absent. Once `succeeded`, `items` and `total` are populated, and each
+        item carries a `per_100g` basis for re-weighing client-side.
+
+        Meals are global, so any authenticated user may read any meal id.
+      security:
+      - bearer_auth: []
+      responses:
+        '200':
+          description: analysis still running
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Meal"
+        '404':
+          description: no meal with that id
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Problem"
+        '401':
+          description: missing or invalid token
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Problem"
+servers:
+- url: http://localhost:3000
+  description: Local development
+components:
+  securitySchemes:
+    bearer_auth:
+      type: http
+      scheme: bearer
+      description: 'Your API token, sent as `Authorization: Bearer <token>`.'
+  schemas:
+    Macros:
+      type: object
+      properties:
+        kcal:
+          type: number
+          format: float
+        protein_g:
+          type: number
+          format: float
+        carbs_g:
+          type: number
+          format: float
+        fat_g:
+          type: number
+          format: float
+      required:
+      - kcal
+      - protein_g
+      - carbs_g
+      - fat_g
+    MealItem:
+      type: object
+      properties:
+        food_name:
+          type: string
+          example: Apple
+        grams:
+          type: number
+          format: float
+          example: 182.0
+        confidence:
+          type: number
+          format: float
+          nullable: true
+          example: 0.92
+          description: The model's confidence in this item, 0.0 to 1.0.
+        kcal:
+          type: number
+          format: float
+        protein_g:
+          type: number
+          format: float
+        carbs_g:
+          type: number
+          format: float
+        fat_g:
+          type: number
+          format: float
+        per_100g:
+          allOf:
+          - "$ref": "#/components/schemas/Macros"
+          description: Nutrition normalised to 100g. Use this to re-weigh the food
+            client-side instead of making another request.
+      required:
+      - food_name
+      - grams
+      - kcal
+      - protein_g
+      - carbs_g
+      - fat_g
+      - per_100g
+    Meal:
+      type: object
+      properties:
+        id:
+          type: integer
+        status:
+          type: string
+          enum:
+          - pending
+          - processing
+          - succeeded
+          - not_food
+          - failed
+          description: "`not_food` means the model looked and found no food. That
+            is an answer, not an error."
+        reused:
+          type: boolean
+          description: True when this response came from an existing analysis.
+        uploaded_by:
+          type: integer
+          nullable: true
+          description: Id of the user who first uploaded this photo. Meals are global,
+            so for a reused analysis this is someone other than the caller.
+        created_at:
+          type: string
+          format: date-time
+        analyzed_at:
+          type: string
+          format: date-time
+          nullable: true
+        items:
+          type: array
+          items:
+            "$ref": "#/components/schemas/MealItem"
+        total:
+          "$ref": "#/components/schemas/Macros"
+        model:
+          type: object
+          properties:
+            id:
+              type: string
+              example: gemini-3.6-flash
+            latency_ms:
+              type: integer
+              nullable: true
+        failure:
+          type: object
+          description: Present only when status is `failed`.
+          properties:
+            kind:
+              type: string
+              enum:
+              - provider_error
+              - rate_limited
+              - invalid_extraction
+              - content_filtered
+              description: "`invalid_extraction` means the model returned well-formed
+                but nutritionally impossible figures."
+            reason:
+              type: string
+      required:
+      - id
+      - status
+      - reused
+      - uploaded_by
+      - created_at
+    Problem:
+      type: object
+      description: RFC 9457 problem details. Every error uses this shape.
+      properties:
+        title:
+          type: string
+        detail:
+          type: string
+        status:
+          type: integer
+      required:
+      - title
+      - detail
+      - status
+security:
+- bearer_auth: []

@@ -1,0 +1,30 @@
+# Omakase is the Rails 8 default: a small, opinionated, low-friction base.
+inherit_gem: { rubocop-rails-omakase: rubocop.yml }
+
+plugins:
+  - rubocop-rspec
+
+AllCops:
+  TargetRubyVersion: 3.4
+  NewCops: enable
+  Exclude:
+    - "bin/**/*"
+    - "db/schema.rb"
+    - "vendor/**/*"
+    - "storage/**/*"
+    - "tmp/**/*"
+    - "node_modules/**/*"
+
+# rswag's `path`/`response` blocks are long by nature and read fine.
+RSpec/ExampleLength:
+  Enabled: false
+RSpec/MultipleExpectations:
+  Enabled: false
+# rswag drives examples through its own DSL, not `it`.
+RSpec/EmptyExampleGroup:
+  Exclude:
+    - "spec/requests/**/*"
+RSpec/VariableName:
+  # rswag binds path/query params as local variables named after the parameter,
+  # which is frequently camelCase or has a leading underscore.
+  Enabled: false

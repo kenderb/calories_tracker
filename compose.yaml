@@ -1,0 +1,64 @@
+name: calories_tracker
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: calories
+      POSTGRES_PASSWORD: calories
+      POSTGRES_DB: calories_tracker_development
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"   # 5433 on the host to avoid clashing with a local Postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U calories"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: bin/rails server -b 0.0.0.0 -p 3000
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://calories:calories@db:5432/calories_tracker_development
+      RAILS_ENV: development
+    volumes:
+      - .:/app
+      - bundle:/usr/local/bundle
+      - storage:/app/storage
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Solid Queue runs the vision calls out of band. Same image, different command.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: bin/jobs
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://calories:calories@db:5432/calories_tracker_development
+      RAILS_ENV: development
+    volumes:
+      - .:/app
+      - bundle:/usr/local/bundle
+      - storage:/app/storage
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  bundle:
+  storage:

@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+# A newer push to the same PR cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: RuboCop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+      - run: bundle exec rubocop --parallel --format github
+
+      # Files created on Windows are committed without the executable bit, so
+      # bin/rails and friends fail here with "Permission denied". Catch it at
+      # lint time rather than three jobs later.
+      - name: bin/ scripts are executable
+        run: |
+          nonexec=$(git ls-files --stage bin/ | awk '$1 != "100755" { print $4 }')
+          if [ -n "$nonexec" ]; then
+            echo "::error::Not executable: $nonexec"
+            echo "Fix with: git update-index --chmod=+x <file>"
+            exit 1
+          fi
+
+  security:
+    name: Brakeman + bundler-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+      - name: Static analysis
+        run: bundle exec brakeman --no-pager
+      - name: Known CVEs in dependencies
+        run: bundle exec bundle-audit check --update
+
+  test:
+    name: RSpec
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: calories
+          POSTGRES_PASSWORD: calories
+        ports: [ "5432:5432" ]
+        options: >-
+          --health-cmd "pg_isready -U calories"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      RAILS_ENV: test
+      DATABASE_URL: postgres://calories:calories@localhost:5432/calories_tracker_test
+      # No cassette may be recorded in CI: an unmatched request fails the spec
+      # rather than quietly calling a provider and spending tokens.
+      VCR_RECORD_MODE: none
+      # Present so the app boots; never used, because nothing hits the network.
+      GEMINI_API_KEY: test-key-not-real
+      OPENAI_API_KEY: test-key-not-real
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libvips for ActiveStorage
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+      - run: bin/rails db:prepare
+      - run: bundle exec rspec
+
+  docs:
+    name: OpenAPI up to date
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: calories
+          POSTGRES_PASSWORD: calories
+        ports: [ "5432:5432" ]
+        options: >-
+          --health-cmd "pg_isready -U calories"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      RAILS_ENV: test
+      DATABASE_URL: postgres://calories:calories@localhost:5432/calories_tracker_test
+      VCR_RECORD_MODE: none
+      GEMINI_API_KEY: test-key-not-real
+      OPENAI_API_KEY: test-key-not-real
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libvips for ActiveStorage
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+      - run: bin/rails db:prepare
+      - name: Regenerate the OpenAPI spec from the request specs
+        run: bundle exec rake rswag:specs:swaggerize
+      - name: Fail if the committed spec has drifted from the code
+        run: |
+          if ! git diff --exit-code -- swagger/; then
+            echo "::error::swagger/ is out of date. Run 'bundle exec rake rswag:specs:swaggerize' and commit the result."
+            exit 1
+          fi
